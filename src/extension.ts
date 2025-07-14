@@ -14,13 +14,18 @@ interface AngularArtifact {
   uri: vscode.Uri;
 }
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, 5000));
+}
+
 class AngularIndex {
   private _map: Map<string, AngularArtifact> = new Map();
-  private _ready: Promise<void>;
+  private _ready: Promise<void> = Promise.resolve();
   private _watcher?: vscode.FileSystemWatcher;
+  private _isIndexing = false;
 
-  constructor() {
-    this._ready = this.buildIndex();
+  get isIndexing() {
+    return this._isIndexing;
   }
 
   async getArtifact(name: string): Promise<AngularArtifact | undefined> {
@@ -28,104 +33,74 @@ class AngularIndex {
     return this._map.get(name);
   }
 
-  async rebuild() {
+  async rebuild(): Promise<void> {
+    this._isIndexing = true;
     this._map.clear();
-    this._ready = this.buildIndex();
-    await this._ready;
-  }
+    try {
+      const files = await vscode.workspace.findFiles(
+        "**/*.ts",
+        "**/node_modules/**"
+      );
 
-  private async buildIndex(): Promise<void> {
-    const files = await vscode.workspace.findFiles(
-      "**/*.ts",
-      "**/node_modules/**"
-    );
+      await Promise.all(
+        files.map(async (file) => {
+          try {
+            const doc = await vscode.workspace.openTextDocument(file);
+            const text = doc.getText();
 
-    await Promise.all(
-      files.map(async (file) => {
-        try {
-          const doc = await vscode.workspace.openTextDocument(file);
-          const text = doc.getText();
-
-          // Component or Directive
-          if (
-            COMPONENT_DECORATOR.test(text) ||
-            DIRECTIVE_DECORATOR.test(text)
-          ) {
-            const match = SELECTOR_PROP.exec(text);
-            if (match) {
-              const selector = match[1];
-              // Support multiple selectors (comma-separated)
-              selector.split(",").forEach((sel) => {
-                const trimmed = sel.trim().replace(/[\[\]]/g, "");
-                this._map.set(trimmed, {
-                  type: COMPONENT_DECORATOR.test(text)
-                    ? "component"
-                    : "directive",
-                  selectorOrName: trimmed,
+            if (
+              COMPONENT_DECORATOR.test(text) ||
+              DIRECTIVE_DECORATOR.test(text)
+            ) {
+              const match = SELECTOR_PROP.exec(text);
+              if (match) {
+                const selector = match[1];
+                selector.split(",").forEach((sel) => {
+                  const trimmed = sel.trim().replace(/[\[\]]/g, "");
+                  this._map.set(trimmed, {
+                    type: COMPONENT_DECORATOR.test(text)
+                      ? "component"
+                      : "directive",
+                    selectorOrName: trimmed,
+                    uri: file,
+                  });
+                });
+              }
+            }
+            if (PIPE_DECORATOR.test(text)) {
+              const match = NAME_PROP.exec(text);
+              if (match) {
+                const name = match[1].trim();
+                this._map.set(name, {
+                  type: "pipe",
+                  selectorOrName: name,
                   uri: file,
                 });
-              });
+              }
             }
+          } catch {
+            // Ignore file parse errors
           }
-          // Pipe
-          if (PIPE_DECORATOR.test(text)) {
-            const match = NAME_PROP.exec(text);
-            if (match) {
-              const name = match[1].trim();
-              this._map.set(name, {
-                type: "pipe",
-                selectorOrName: name,
-                uri: file,
-              });
-            }
-          }
-        } catch (err) {
-          console.error("Error processing file:", file.fsPath, err);
-        }
-      })
-    );
+        })
+      );
+    } finally {
+      this._isIndexing = false;
+    }
 
-    // Watcher: updates on .ts file changes
+    // Watch for .ts file changes (for all adds/changes/deletes)
     this._watcher?.dispose();
     this._watcher = vscode.workspace.createFileSystemWatcher("**/*.ts");
-    this._watcher.onDidCreate((uri) => this.addFile(uri));
-    this._watcher.onDidChange((uri) => this.addFile(uri));
+    this._watcher.onDidCreate((uri) => this.handleFileChange());
+    this._watcher.onDidChange((uri) => this.handleFileChange());
     this._watcher.onDidDelete((uri) => this.removeFile(uri));
-    console.log(
-      `[AngularIndex] Indexed selectors: ${Array.from(this._map.keys()).join(
-        ", "
-      )}`
-    );
   }
 
-  private async addFile(uri: vscode.Uri) {
-    // Same logic as buildIndex for a single file
-    try {
-      const doc = await vscode.workspace.openTextDocument(uri);
-      const text = doc.getText();
-
-      if (COMPONENT_DECORATOR.test(text) || DIRECTIVE_DECORATOR.test(text)) {
-        const match = SELECTOR_PROP.exec(text);
-        if (match) {
-          const selector = match[1];
-          selector.split(",").forEach((sel) => {
-            const trimmed = sel.trim().replace(/[\[\]]/g, "");
-            this._map.set(trimmed, {
-              type: COMPONENT_DECORATOR.test(text) ? "component" : "directive",
-              selectorOrName: trimmed,
-              uri,
-            });
-          });
-        }
-      }
-      if (PIPE_DECORATOR.test(text)) {
-        const match = NAME_PROP.exec(text);
-        if (match) {
-          const name = match[1].trim();
-          this._map.set(name, { type: "pipe", selectorOrName: name, uri });
-        }
-      }
-    } catch {}
+  private async handleFileChange() {
+    if (this.isIndexing) return;
+    await indexWithProgress(
+      "Angular Template Navigator: Updating index after file change...",
+      () => this.rebuild()
+    );
   }
 
   private removeFile(uri: vscode.Uri) {
@@ -163,7 +138,6 @@ class AngularDefinitionProvider implements vscode.DefinitionProvider {
     }
 
     // Match pipe in interpolation or in *ngFor (e.g., {{ value | pipeName }})
-    // Basic pattern: "| pipeName" (optionally surrounded by spaces)
     const pipePattern = new RegExp(`\\|\\s*${word}\\b`);
     if (pipePattern.test(line)) {
       const artifact = await this.index.getArtifact(word);
@@ -175,13 +149,46 @@ class AngularDefinitionProvider implements vscode.DefinitionProvider {
   }
 }
 
-let index: AngularIndex;
+let angularIndex: AngularIndex;
+
+async function indexWithProgress(
+  title: string,
+  doIndex: () => Promise<void>,
+  doneInfo?: string // Optional message shown after manual refresh only
+) {
+  // Prevent concurrent runs
+  if (angularIndex && angularIndex.isIndexing) return;
+
+  try {
+    await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title,
+        cancellable: false,
+      },
+      async () => {
+        await doIndex();
+      }
+    );
+    if (doneInfo) {
+      vscode.window.showInformationMessage(doneInfo);
+    }
+  } catch (err) {
+    vscode.window.showErrorMessage(
+      "Angular Template Navigator: Indexing failed."
+    );
+    throw err;
+  }
+}
 
 export function activate(context: vscode.ExtensionContext) {
-  vscode.window.showInformationMessage(
-    "Angular Goto Component Extension ACTIVATED!"
+  angularIndex = new AngularIndex();
+
+  // Initial index on activate
+  indexWithProgress(
+    "Angular Template Navigator: Indexing Angular templates...",
+    () => angularIndex.rebuild()
   );
-  index = new AngularIndex();
 
   context.subscriptions.push(
     vscode.languages.registerDefinitionProvider(
@@ -189,22 +196,20 @@ export function activate(context: vscode.ExtensionContext) {
         { scheme: "file", language: "html" },
         { scheme: "file", language: "angular" },
       ],
-      new AngularDefinitionProvider(index)
+      new AngularDefinitionProvider(angularIndex)
     )
   );
 
   context.subscriptions.push(
     vscode.commands.registerCommand(
-      "angularGotoComponent.refreshIndex",
+      "angularTemplateNavigator.refreshIndex",
       async () => {
-        await vscode.window.withProgress(
-          {
-            location: vscode.ProgressLocation.Notification,
-            title: "Rebuilding Angular index...",
-          },
-          () => index.rebuild()
+        if (angularIndex.isIndexing) return;
+        await indexWithProgress(
+          "Angular Template Navigator: Rebuilding index...",
+          () => angularIndex.rebuild(),
+          "Angular Template Navigator: Indexing complete."
         );
-        vscode.window.showInformationMessage("Angular index refreshed.");
       }
     )
   );
