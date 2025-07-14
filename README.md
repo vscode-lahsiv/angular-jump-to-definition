@@ -1,71 +1,73 @@
-# angular-locator README
+# Angular Template Navigator
 
-This is the README for your extension "angular-locator". After writing up a brief description, we recommend including the following sections.
-
-## Features
-
-Describe specific features of your extension including screenshots of your extension in action. Image paths are relative to this README file.
-
-For example if there is an image subfolder under your extension project workspace:
-
-\!\[feature X\]\(images/feature-x.png\)
-
-> Tip: Many popular extensions utilize animations. This is an excellent way to show off your extension! We recommend short, focused animations that are easy to follow.
-
-## Requirements
-
-If you have any requirements or dependencies, add a section describing those and how to install and configure them.
-
-## Extension Settings
-
-Include if your extension adds any VS Code settings through the `contributes.configuration` extension point.
-
-For example:
-
-This extension contributes the following settings:
-
-* `myExtension.enable`: Enable/disable this extension.
-* `myExtension.thing`: Set to `blah` to do something.
-
-## Known Issues
-
-Calling out known issues can help limit users opening duplicate issues against your extension.
-
-## Release Notes
-
-Users appreciate release notes as you update your extension.
-
-### 1.0.0
-
-Initial release of ...
-
-### 1.0.1
-
-Fixed issue #.
-
-### 1.1.0
-
-Added features X, Y, and Z.
+**Navigate instantly from your Angular templates to any component, directive, pipe, or CSS with just Ctrl+Click or F12.**
 
 ---
 
-## Following extension guidelines
+## Features
 
-Ensure that you've read through the extensions guidelines and follow the best practices for creating your extension.
+- **Go to Component/Directive**  
+  Ctrl+Click or F12 on any Angular component (`<my-component>`) or directive selector (`*myDirective`) in your template to open the corresponding TypeScript file.
 
-* [Extension Guidelines](https://code.visualstudio.com/api/references/extension-guidelines)
+- **Go to Pipe**  
+  Ctrl+Click or F12 on any Angular pipe (`| myPipe`) to jump straight to its implementation.
 
-## Working with Markdown
+- **Fast & Workspace-wide**  
+  Indexes all components, directives, and pipes in your entire workspace, including monorepos and libraries.
 
-You can author your README using Visual Studio Code. Here are some useful editor keyboard shortcuts:
+- **Auto-indexing**  
+  Keeps navigation up-to-date as you add, remove, or change `.ts` files—no configuration needed.
 
-* Split the editor (`Cmd+\` on macOS or `Ctrl+\` on Windows and Linux).
-* Toggle preview (`Shift+Cmd+V` on macOS or `Shift+Ctrl+V` on Windows and Linux).
-* Press `Ctrl+Space` (Windows, Linux, macOS) to see a list of Markdown snippets.
+- **Coming Soon**  
+  CSS/SCSS class navigation from your templates.
 
-## For more information
+---
 
-* [Visual Studio Code's Markdown Support](http://code.visualstudio.com/docs/languages/markdown)
-* [Markdown Syntax Reference](https://help.github.com/articles/markdown-basics/)
+## How to Use
 
-**Enjoy!**
+1. **Install** Angular Template Navigator from the VS Code Marketplace.
+2. **Open any Angular template file** (usually `*.html`).
+3. **Ctrl+Click** (Cmd+Click on Mac) or **press F12** on:
+   - A component or directive tag (`<my-selector>`, `</my-selector>`, `*myDirective`)
+   - An Angular pipe in an expression (`| myPipe`)
+4. Instantly jump to the TypeScript file where it's defined.
+
+---
+
+## Example
+
+```html
+<!-- Component navigation -->
+<app-user-profile></app-user-profile>
+
+<!-- Directive navigation -->
+<button *myHighlight>Highlight Me</button>
+
+<!-- Pipe navigation -->
+{{ user.name | capitalize }}
+```
+
+## Extension Commands
+
+- Angular Template Navigator: Refresh Index
+  Available from the Command Palette.
+  Use to manually rebuild the navigation index if you’ve made large structural changes.
+
+## Extension Commands
+
+1. No setup required — works in any Angular project, no configuration needed.
+
+2. Blazing fast — uses smart indexing for instant navigation.
+
+3. Works everywhere — supports monorepos, feature folders, shared libraries, and custom structures.
+
+4. Supports both opening and closing tags, multiple selectors, pipes, and directives.
+
+5. Future-proof — new features like CSS navigation coming soon.
+
+## License
+
+MIT
+
+Angular Template Navigator is not affiliated with Google or the Angular team.
+Made with ❤️ for Angular developers.
