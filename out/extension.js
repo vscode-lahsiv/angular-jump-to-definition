@@ -36,15 +36,13 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.activate = activate;
 exports.deactivate = deactivate;
 const vscode = __importStar(require("vscode"));
+const fs = __importStar(require("fs"));
 // Utility regex patterns
 const COMPONENT_DECORATOR = /@Component\s*\(([\s\S]*?)\)/m;
 const DIRECTIVE_DECORATOR = /@Directive\s*\(([\s\S]*?)\)/m;
 const PIPE_DECORATOR = /@Pipe\s*\(([\s\S]*?)\)/m;
 const SELECTOR_PROP = /selector\s*:\s*['"`]([^'"`]+)['"`]/m;
 const NAME_PROP = /name\s*:\s*['"`]([^'"`]+)['"`]/m;
-function sleep(ms) {
-    return new Promise((resolve) => setTimeout(resolve, 5000));
-}
 class AngularIndex {
     _map = new Map();
     _ready = Promise.resolve();
@@ -151,10 +149,102 @@ class AngularDefinitionProvider {
                 return new vscode.Location(artifact.uri, new vscode.Position(0, 0));
             }
         }
+        if (document.uri.fsPath.endsWith(".component.html")) {
+            // Try to find .component.scss in same folder
+            const scssPath = document.uri.fsPath.replace(".html", ".scss");
+            if (fs.existsSync(scssPath)) {
+                const scssDoc = await vscode.workspace.openTextDocument(scssPath);
+                const lines = scssDoc.getText().split(/\r?\n/);
+                // Get the class name under the cursor (from class="..." or ngClass)
+                // For simplicity, get word under cursor
+                const word = document.getText(document.getWordRangeAtPosition(position, /[\w-]+/));
+                const matchLine = lines.findIndex((line) => line.includes("." + word));
+                if (matchLine !== -1) {
+                    return new vscode.Location(scssDoc.uri, new vscode.Position(matchLine, 0));
+                }
+            }
+        }
+        return;
+    }
+}
+class CssClassDefinitionProvider {
+    async provideDefinition(document, position, _token) {
+        // Only for .component.html
+        if (!document.uri.fsPath.endsWith(".html"))
+            return;
+        const range = document.getWordRangeAtPosition(position, /[\w-]+/);
+        if (!range)
+            return;
+        const word = document.getText(range);
+        // Only act if cursor is inside a class="..." attribute
+        const line = document.lineAt(position.line).text;
+        // Find if the line contains class="..."
+        const classAttrMatch = line.match(/class\s*=\s*["']([^"']+)["']/);
+        if (!classAttrMatch)
+            return;
+        // Parse all classes in class="..." and make sure cursor is on one
+        const classes = classAttrMatch[1].split(/\s+/);
+        if (!classes.includes(word))
+            return;
+        // Find .component.scss in same folder
+        const scssPath = document.uri.fsPath.replace(".html", ".scss");
+        if (!fs.existsSync(scssPath))
+            return;
+        // Read lines and look for a loose match with .<class>
+        const scssDoc = await vscode.workspace.openTextDocument(scssPath);
+        const lines = scssDoc.getText().split(/\r?\n/);
+        for (let i = 0; i < lines.length; i++) {
+            if (lines[i].includes(`.${word}`)) {
+                return new vscode.Location(scssDoc.uri, new vscode.Position(i, 0));
+            }
+        }
+        // Not found: do nothing
+        return;
+    }
+}
+class CssClassHoverProvider {
+    async provideHover(document, position, token) {
+        if (!document.uri.fsPath.endsWith(".html"))
+            return;
+        const range = document.getWordRangeAtPosition(position, /[\w-]+/);
+        if (!range)
+            return;
+        const word = document.getText(range);
+        const line = document.lineAt(position.line).text;
+        const classAttrMatch = line.match(/class\s*=\s*["']([^"']+)["']/);
+        if (!classAttrMatch)
+            return;
+        const classes = classAttrMatch[1].split(/\s+/);
+        if (!classes.includes(word))
+            return;
+        const scssPath = document.uri.fsPath.replace(".html", ".scss");
+        if (!fs.existsSync(scssPath))
+            return;
+        const scssDoc = await vscode.workspace.openTextDocument(scssPath);
+        const lines = scssDoc.getText().split(/\r?\n/);
+        for (let i = 0; i < lines.length; i++) {
+            if (lines[i].includes(`.${word}`)) {
+                // Show the whole CSS block (from { to matching })
+                let block = [lines[i]];
+                let braceCount = (lines[i].match(/{/g) || []).length -
+                    (lines[i].match(/}/g) || []).length;
+                let j = i + 1;
+                while (braceCount > 0 && j < lines.length) {
+                    block.push(lines[j]);
+                    braceCount += (lines[j].match(/{/g) || []).length;
+                    braceCount -= (lines[j].match(/}/g) || []).length;
+                    j++;
+                }
+                // VS Code hovers are limited in height, but this shows the full block up to the max.
+                const hoverText = [{ language: "scss", value: block.join("\n") }];
+                return new vscode.Hover(hoverText, range);
+            }
+        }
         return;
     }
 }
 let angularIndex;
+let isManualRefresh = false;
 async function indexWithProgress(title, doIndex, doneInfo // Optional message shown after manual refresh only
 ) {
     // Prevent concurrent runs
@@ -168,13 +258,16 @@ async function indexWithProgress(title, doIndex, doneInfo // Optional message sh
         }, async () => {
             await doIndex();
         });
-        if (doneInfo) {
+        if (doneInfo && isManualRefresh) {
             vscode.window.showInformationMessage(doneInfo);
         }
     }
     catch (err) {
         vscode.window.showErrorMessage("Angular Template Navigator: Indexing failed.");
         throw err;
+    }
+    finally {
+        isManualRefresh = false;
     }
 }
 function activate(context) {
@@ -184,10 +277,17 @@ function activate(context) {
     context.subscriptions.push(vscode.languages.registerDefinitionProvider([
         { scheme: "file", language: "html" },
         { scheme: "file", language: "angular" },
-    ], new AngularDefinitionProvider(angularIndex)));
+    ], new AngularDefinitionProvider(angularIndex)), vscode.languages.registerDefinitionProvider([
+        { scheme: "file", language: "html" },
+        { scheme: "file", language: "angular" },
+    ], new CssClassDefinitionProvider()), vscode.languages.registerHoverProvider([
+        { scheme: "file", language: "html" },
+        { scheme: "file", language: "angular" },
+    ], new CssClassHoverProvider()));
     context.subscriptions.push(vscode.commands.registerCommand("angularTemplateNavigator.refreshIndex", async () => {
         if (angularIndex.isIndexing)
             return;
+        isManualRefresh = true;
         await indexWithProgress("Angular Template Navigator: Rebuilding index...", () => angularIndex.rebuild(), "Angular Template Navigator: Indexing complete.");
     }));
 }
