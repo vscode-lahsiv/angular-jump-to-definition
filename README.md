@@ -2,7 +2,6 @@
 
 **Navigate instantly from your Angular templates to any component, directive, pipe, or CSS/SCSS class with just Ctrl+Click or F12. Hover over class names to preview SCSS.**
 
-![Demo](https://raw.githubusercontent.com/youruser/yourrepo/main/assets/demo.gif)
 ---
 
 ## Features
@@ -24,6 +23,12 @@
 
 - **Auto-indexing**  
   Keeps navigation up-to-date as you add, remove, or change `.ts` files—no configuration needed.
+
+---
+
+## Demo
+
+![Demo](https://github.com/vscode-lahsiv/angular-jump-to-definition/raw/main/assets/demo.gif)
 
 ---
 
