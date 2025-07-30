@@ -18,3 +18,15 @@
 ## [1.2.1] - 2024-07-17
 
 - Internal performance improvements.
+
+## [1.3.0] - 2024-07-17
+
+- Supports Class Bindings and ngClass.
+- Improved Performance and UI changes.
+- Signals will be covered and on hover shows the type of signal (Experimental)
+  - signal: Blue
+  - input: Teal
+  - output: Red
+  - model: Purple
+  - computed: Light blue
+  - linkedSignal: Light purple

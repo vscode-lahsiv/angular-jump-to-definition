@@ -37,90 +37,286 @@ exports.activate = activate;
 exports.deactivate = deactivate;
 const vscode = __importStar(require("vscode"));
 const fs = __importStar(require("fs"));
-// Utility regex patterns
+// ---------------- Signal Detection and Decoration ------------------
+const KIND_EMOJI = {
+    signal: "signal",
+    input: "input",
+    output: "output",
+    model: "model",
+    computed: "computed",
+    linkedSignal: "linkedSignal",
+};
+// Define distinct colors for each kind
+const KIND_COLORS = {
+    signal: "#569CD6", // Blue for signals
+    input: "#4EC9B0", // Teal for inputs
+    output: "#D16969", // Red for outputs
+    model: "#C586C0", // Purple for models
+    computed: "#4FC1FF", // Light blue for computed
+    linkedSignal: "#B8A1FF", // Light purple for linkedSignal
+};
+const KIND_STYLE = {};
+function extractSignalsFromTs(tsText) {
+    const results = {};
+    // Regex patterns for each kind (type is optional)
+    const patterns = [
+        { kind: "signal", regex: /(\w+)\s*=\s*signal\s*\(/g },
+        { kind: "input", regex: /(\w+)\s*=\s*input\s*\(/g },
+        { kind: "output", regex: /(\w+)\s*=\s*output(?:\s*<([^>]*)>)?\s*\(/g },
+        { kind: "model", regex: /(\w+)\s*=\s*model(?:\s*<([^>]*)>)?\s*\(/g },
+        { kind: "computed", regex: /(\w+)\s*=\s*computed\s*\(/g },
+        { kind: "linkedSignal", regex: /(\w+)\s*=\s*linkedSignal\s*\(/g },
+    ];
+    for (const { kind, regex } of patterns) {
+        let match;
+        while ((match = regex.exec(tsText))) {
+            const name = match[1];
+            const type = match[2]?.trim() || "unknown";
+            results[name] = { kind, type };
+        }
+    }
+    return results;
+}
+function decorateSignalsInTemplate(templateDoc, signals) {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || editor.document !== templateDoc) {
+        console.log("No active editor or editor document mismatch");
+        return;
+    }
+    // Find all foo() in template
+    const regex = /(\w+)\s*\(\s*\)/g; // Matches mySignal()
+    const text = templateDoc.getText();
+    let match;
+    const decoOptions = {};
+    for (const kind of Object.keys(KIND_EMOJI))
+        decoOptions[kind] = [];
+    while ((match = regex.exec(text))) {
+        const name = match[1];
+        if (signals[name]) {
+            console.log(`Applying ${signals[name]}`);
+            const kind = signals[name].kind;
+            console.log(`Applying ${kind}`);
+            const startPos = templateDoc.positionAt(match.index);
+            // Include parentheses in the range for full mySignal()
+            const endPos = templateDoc.positionAt(match.index + match[0].length);
+            const range = new vscode.Range(startPos, endPos);
+            // Decoration with gutter emoji and hover message
+            decoOptions[kind].push({
+                range,
+                hoverMessage: `Signal: ${name}`,
+                renderOptions: {
+                    before: {
+                        contentText: KIND_EMOJI[kind] + "-->",
+                        color: "#888",
+                        fontWeight: "bold",
+                        margin: "0 4px 0 0",
+                    },
+                    // Apply color to the signal text
+                    after: {
+                        contentText: "", // No content needed after
+                    },
+                },
+            });
+        }
+    }
+    // Create and set decorations per kind
+    for (const kind of Object.keys(KIND_EMOJI)) {
+        if (!KIND_STYLE[kind]) {
+            KIND_STYLE[kind] = vscode.window.createTextEditorDecorationType({
+                isWholeLine: false,
+                overviewRulerColor: KIND_COLORS[kind],
+                overviewRulerLane: vscode.OverviewRulerLane.Right,
+                fontStyle: "italic",
+                fontWeight: "bold",
+                textDecoration: `none; color: ${KIND_COLORS[kind]} !important;`, // Override theme defaults
+            });
+        }
+        editor.setDecorations(KIND_STYLE[kind], decoOptions[kind]);
+    }
+}
+// ----------- Angular Navigation & CSS Indexing ---------------------
 const COMPONENT_DECORATOR = /@Component\s*\(([\s\S]*?)\)/m;
 const DIRECTIVE_DECORATOR = /@Directive\s*\(([\s\S]*?)\)/m;
 const PIPE_DECORATOR = /@Pipe\s*\(([\s\S]*?)\)/m;
 const SELECTOR_PROP = /selector\s*:\s*['"`]([^'"`]+)['"`]/m;
 const NAME_PROP = /name\s*:\s*['"`]([^'"`]+)['"`]/m;
+const MAX_FILES = 2000;
 class AngularIndex {
     _map = new Map();
-    _ready = Promise.resolve();
-    _watcher;
     _isIndexing = false;
     get isIndexing() {
         return this._isIndexing;
     }
     async getArtifact(name) {
-        await this._ready;
         return this._map.get(name);
     }
-    async rebuild() {
+    async rebuild(progress) {
         this._isIndexing = true;
         this._map.clear();
-        try {
-            const files = await vscode.workspace.findFiles("**/*.ts", "**/node_modules/**");
-            await Promise.all(files.map(async (file) => {
-                try {
-                    const doc = await vscode.workspace.openTextDocument(file);
-                    const text = doc.getText();
-                    if (COMPONENT_DECORATOR.test(text) ||
-                        DIRECTIVE_DECORATOR.test(text)) {
-                        const match = SELECTOR_PROP.exec(text);
-                        if (match) {
-                            const selector = match[1];
-                            selector.split(",").forEach((sel) => {
-                                const trimmed = sel.trim().replace(/[\[\]]/g, "");
-                                this._map.set(trimmed, {
-                                    type: COMPONENT_DECORATOR.test(text)
-                                        ? "component"
-                                        : "directive",
-                                    selectorOrName: trimmed,
-                                    uri: file,
-                                });
-                            });
-                        }
-                    }
-                    if (PIPE_DECORATOR.test(text)) {
-                        const match = NAME_PROP.exec(text);
-                        if (match) {
-                            const name = match[1].trim();
-                            this._map.set(name, {
-                                type: "pipe",
-                                selectorOrName: name,
+        const files = await vscode.workspace.findFiles("**/*.ts", "**/node_modules/**");
+        // Cap for large projects
+        if (files.length > MAX_FILES) {
+            vscode.window.showWarningMessage(`Angular Template Navigator: Workspace too large (${files.length} files). Extension Disabled.`);
+            this._isIndexing = false;
+            return;
+        }
+        let i = 0;
+        for (const file of files) {
+            try {
+                const doc = await vscode.workspace.openTextDocument(file);
+                const text = doc.getText();
+                if (COMPONENT_DECORATOR.test(text) || DIRECTIVE_DECORATOR.test(text)) {
+                    const match = SELECTOR_PROP.exec(text);
+                    if (match) {
+                        const selector = match[1];
+                        selector.split(",").forEach((sel) => {
+                            const trimmed = sel.trim().replace(/[\[\]]/g, "");
+                            this._map.set(trimmed, {
+                                type: COMPONENT_DECORATOR.test(text)
+                                    ? "component"
+                                    : "directive",
+                                selectorOrName: trimmed,
                                 uri: file,
                             });
-                        }
+                        });
                     }
                 }
-                catch {
-                    // Ignore file parse errors
+                if (PIPE_DECORATOR.test(text)) {
+                    const match = NAME_PROP.exec(text);
+                    if (match) {
+                        const name = match[1].trim();
+                        this._map.set(name, {
+                            type: "pipe",
+                            selectorOrName: name,
+                            uri: file,
+                        });
+                    }
                 }
-            }));
-        }
-        finally {
-            this._isIndexing = false;
-        }
-        // Watch for .ts file changes (for all adds/changes/deletes)
-        this._watcher?.dispose();
-        this._watcher = vscode.workspace.createFileSystemWatcher("**/*.ts");
-        this._watcher.onDidCreate((uri) => this.handleFileChange());
-        this._watcher.onDidChange((uri) => this.handleFileChange());
-        this._watcher.onDidDelete((uri) => this.removeFile(uri));
-    }
-    async handleFileChange() {
-        if (this.isIndexing)
-            return;
-        await indexWithProgress("Angular Template Navigator: Updating index after file change...", () => this.rebuild());
-    }
-    removeFile(uri) {
-        for (const [key, artifact] of this._map.entries()) {
-            if (artifact.uri.toString() === uri.toString()) {
-                this._map.delete(key);
+            }
+            catch { }
+            i++;
+            if (progress) {
+                progress.report({
+                    increment: 100 / files.length,
+                    message: `Indexed ${i} of ${files.length} files.`,
+                });
             }
         }
+        this._isIndexing = false;
     }
 }
+function findScssPath(htmlPath) {
+    const scss = htmlPath.replace(/\.html$/, ".scss");
+    return fs.existsSync(scss) ? scss : undefined;
+}
+function extractClassNameFromNgClass(line, cursorIndex) {
+    // [ngClass]="'foo bar'" or [ngClass]="['foo', ...]"
+    // We try to get the class under cursor (in a string literal or array)
+    const singleQuote = line.match(/\[ngClass\]\s*=\s*'([^']+)'/);
+    const doubleQuote = line.match(/\[ngClass\]\s*=\s*"([^"]+)"/);
+    const arrayQuote = line.match(/\[ngClass\]\s*=\s*\[([^\]]+)\]/);
+    let candidates = [];
+    if (singleQuote)
+        candidates = singleQuote[1].split(/\s+/);
+    else if (doubleQuote)
+        candidates = doubleQuote[1].split(/\s+/);
+    else if (arrayQuote)
+        candidates = arrayQuote[1]
+            .split(/,\s*/)
+            .map((s) => s.replace(/['"`]/g, "").trim());
+    for (const cname of candidates) {
+        const idx = line.indexOf(cname);
+        if (idx !== -1 && cursorIndex >= idx && cursorIndex <= idx + cname.length)
+            return cname;
+    }
+    return undefined;
+}
+function extractClassNameFromClassBinding(line, position) {
+    // [class.foo]="..."
+    const m = line.match(/\[class\.([\w-]+)\]/);
+    if (m)
+        return m[1];
+    return undefined;
+}
+function extractClassNameFromClassAttr(line, position) {
+    const classAttrMatch = line.match(/class\s*=\s*["']([^"']+)["']/);
+    if (!classAttrMatch)
+        return;
+    const classes = classAttrMatch[1].split(/\s+/);
+    // Find which class is under the cursor
+    let offset = line.indexOf(classAttrMatch[1]);
+    for (const cname of classes) {
+        const start = offset;
+        const end = start + cname.length;
+        if (position.character >= start && position.character <= end)
+            return cname;
+        offset = end + 1;
+    }
+    return undefined;
+}
+async function findCssDefinition(document, position) {
+    const scssPath = findScssPath(document.uri.fsPath);
+    if (!scssPath)
+        return;
+    const scssDoc = await vscode.workspace.openTextDocument(scssPath);
+    const lines = scssDoc.getText().split(/\r?\n/);
+    const line = document.lineAt(position.line).text;
+    let className;
+    // Check for class="..."
+    className = extractClassNameFromClassAttr(line, position);
+    // Check for [class.foo]
+    if (!className)
+        className = extractClassNameFromClassBinding(line, position);
+    // Check for [ngClass]
+    if (!className && line.includes("[ngClass]")) {
+        className = extractClassNameFromNgClass(line, position.character);
+    }
+    if (!className)
+        return;
+    for (let i = 0; i < lines.length; i++) {
+        if (lines[i].includes(`.${className}`)) {
+            return new vscode.Location(scssDoc.uri, new vscode.Position(i, 0));
+        }
+    }
+    return undefined;
+}
+async function findCssHover(document, position) {
+    const scssPath = findScssPath(document.uri.fsPath);
+    if (!scssPath)
+        return;
+    const scssDoc = await vscode.workspace.openTextDocument(scssPath);
+    const lines = scssDoc.getText().split(/\r?\n/);
+    const line = document.lineAt(position.line).text;
+    let className;
+    className = extractClassNameFromClassAttr(line, position);
+    if (!className)
+        className = extractClassNameFromClassBinding(line, position);
+    if (!className && line.includes("[ngClass]")) {
+        className = extractClassNameFromNgClass(line, position.character);
+    }
+    if (!className)
+        return;
+    for (let i = 0; i < lines.length; i++) {
+        if (lines[i].includes(`.${className}`)) {
+            // Show the whole CSS block (from { to matching })
+            let block = [lines[i]];
+            let braceCount = (lines[i].match(/{/g) || []).length -
+                (lines[i].match(/}/g) || []).length;
+            let j = i + 1;
+            while (braceCount > 0 && j < lines.length) {
+                block.push(lines[j]);
+                braceCount += (lines[j].match(/{/g) || []).length;
+                braceCount -= (lines[j].match(/}/g) || []).length;
+                j++;
+            }
+            const hoverText = [{ language: "scss", value: block.join("\n") }];
+            const range = new vscode.Range(position.line, line.indexOf(className), position.line, line.indexOf(className) + className.length);
+            return new vscode.Hover(hoverText, range);
+        }
+    }
+    return;
+}
+// ------------------ Providers ----------------------
 class AngularDefinitionProvider {
     index;
     constructor(index) {
@@ -132,6 +328,10 @@ class AngularDefinitionProvider {
             return;
         const word = document.getText(range);
         const line = document.lineAt(position.line).text;
+        // CSS logic (for class, [class.foo], [ngClass])
+        const cssLoc = await findCssDefinition(document, position);
+        if (cssLoc)
+            return cssLoc;
         // Match opening/closing/self-closing component/directive tag
         const tagPattern = new RegExp(`</?\\s*${word}(\\s|>|\\/|$)`);
         if (tagPattern.test(line)) {
@@ -149,105 +349,46 @@ class AngularDefinitionProvider {
                 return new vscode.Location(artifact.uri, new vscode.Position(0, 0));
             }
         }
-        if (document.uri.fsPath.endsWith(".component.html")) {
-            // Try to find .component.scss in same folder
-            const scssPath = document.uri.fsPath.replace(".html", ".scss");
-            if (fs.existsSync(scssPath)) {
-                const scssDoc = await vscode.workspace.openTextDocument(scssPath);
-                const lines = scssDoc.getText().split(/\r?\n/);
-                // Get the class name under the cursor (from class="..." or ngClass)
-                // For simplicity, get word under cursor
-                const word = document.getText(document.getWordRangeAtPosition(position, /[\w-]+/));
-                const matchLine = lines.findIndex((line) => line.includes("." + word));
-                if (matchLine !== -1) {
-                    return new vscode.Location(scssDoc.uri, new vscode.Position(matchLine, 0));
-                }
-            }
-        }
-        return;
-    }
-}
-class CssClassDefinitionProvider {
-    async provideDefinition(document, position, _token) {
-        // Only for .component.html
-        if (!document.uri.fsPath.endsWith(".html"))
-            return;
-        const range = document.getWordRangeAtPosition(position, /[\w-]+/);
-        if (!range)
-            return;
-        const word = document.getText(range);
-        // Only act if cursor is inside a class="..." attribute
-        const line = document.lineAt(position.line).text;
-        // Find if the line contains class="..."
-        const classAttrMatch = line.match(/class\s*=\s*["']([^"']+)["']/);
-        if (!classAttrMatch)
-            return;
-        // Parse all classes in class="..." and make sure cursor is on one
-        const classes = classAttrMatch[1].split(/\s+/);
-        if (!classes.includes(word))
-            return;
-        // Find .component.scss in same folder
-        const scssPath = document.uri.fsPath.replace(".html", ".scss");
-        if (!fs.existsSync(scssPath))
-            return;
-        // Read lines and look for a loose match with .<class>
-        const scssDoc = await vscode.workspace.openTextDocument(scssPath);
-        const lines = scssDoc.getText().split(/\r?\n/);
-        for (let i = 0; i < lines.length; i++) {
-            if (lines[i].includes(`.${word}`)) {
-                return new vscode.Location(scssDoc.uri, new vscode.Position(i, 0));
-            }
-        }
-        // Not found: do nothing
         return;
     }
 }
 class CssClassHoverProvider {
-    async provideHover(document, position, token) {
-        if (!document.uri.fsPath.endsWith(".html"))
+    async provideHover(document, position, _token) {
+        return findCssHover(document, position);
+    }
+}
+// ----------- Signals Hover Provider -----------------
+class SignalHoverProvider {
+    getSignals;
+    constructor(getSignals) {
+        this.getSignals = getSignals;
+    }
+    provideHover(document, position) {
+        if (!document.fileName.endsWith(".component.html"))
             return;
-        const range = document.getWordRangeAtPosition(position, /[\w-]+/);
+        const range = document.getWordRangeAtPosition(position, /\w+/);
         if (!range)
             return;
         const word = document.getText(range);
-        const line = document.lineAt(position.line).text;
-        const classAttrMatch = line.match(/class\s*=\s*["']([^"']+)["']/);
-        if (!classAttrMatch)
-            return;
-        const classes = classAttrMatch[1].split(/\s+/);
-        if (!classes.includes(word))
-            return;
-        const scssPath = document.uri.fsPath.replace(".html", ".scss");
-        if (!fs.existsSync(scssPath))
-            return;
-        const scssDoc = await vscode.workspace.openTextDocument(scssPath);
-        const lines = scssDoc.getText().split(/\r?\n/);
-        for (let i = 0; i < lines.length; i++) {
-            if (lines[i].includes(`.${word}`)) {
-                // Show the whole CSS block (from { to matching })
-                let block = [lines[i]];
-                let braceCount = (lines[i].match(/{/g) || []).length -
-                    (lines[i].match(/}/g) || []).length;
-                let j = i + 1;
-                while (braceCount > 0 && j < lines.length) {
-                    block.push(lines[j]);
-                    braceCount += (lines[j].match(/{/g) || []).length;
-                    braceCount -= (lines[j].match(/}/g) || []).length;
-                    j++;
-                }
-                // VS Code hovers are limited in height, but this shows the full block up to the max.
-                const hoverText = [{ language: "scss", value: block.join("\n") }];
-                return new vscode.Hover(hoverText, range);
-            }
+        const after = document.getText(new vscode.Range(range.end, range.end.translate(0, 2)));
+        const signals = this.getSignals(document);
+        if (after.trim().startsWith("()") && signals[word]) {
+            const sig = signals[word];
+            return new vscode.Hover([
+                `**${sig.kind.charAt(0).toUpperCase() + sig.kind.slice(1)}**`,
+                sig.type && sig.type !== "unknown" ? `\`type: ${sig.type}\`` : "",
+            ]
+                .filter(Boolean)
+                .join("\n"), range);
         }
-        return;
     }
 }
+// ---------------- Main Extension Activation ------------------
 let angularIndex;
 let isManualRefresh = false;
-async function indexWithProgress(title, doIndex, doneInfo // Optional message shown after manual refresh only
-) {
-    // Prevent concurrent runs
+// Map of html doc uri -> last signals parsed
+const signalCache = new Map();
+async function indexWithProgress(title, doIndex, doneInfo) {
     if (angularIndex && angularIndex.isIndexing)
         return;
     try {
@@ -255,8 +396,8 @@ async function indexWithProgress(title, doIndex, doneInfo // Optional message sh
             location: vscode.ProgressLocation.Notification,
             title,
             cancellable: false,
-        }, async () => {
-            await doIndex();
+        }, async (progress) => {
+            await doIndex(progress);
         });
         if (doneInfo && isManualRefresh) {
             vscode.window.showInformationMessage(doneInfo);
@@ -272,26 +413,61 @@ async function indexWithProgress(title, doIndex, doneInfo // Optional message sh
 }
 function activate(context) {
     angularIndex = new AngularIndex();
-    // Initial index on activate
-    indexWithProgress("Angular Template Navigator: Indexing Angular templates...", () => angularIndex.rebuild());
+    // Initial index on activate (progress bar)
+    indexWithProgress("Angular Template Navigator: Templates", (progress) => angularIndex.rebuild(progress));
+    // Index only on SAVE of .ts/.html files
+    context.subscriptions.push(vscode.workspace.onDidSaveTextDocument(async (doc) => {
+        if (!angularIndex.isIndexing &&
+            (doc.fileName.endsWith(".ts") || doc.fileName.endsWith(".html"))) {
+            await indexWithProgress("Angular Template Navigator: Indexing Update", (progress) => angularIndex.rebuild(progress));
+        }
+    }));
+    // SIGNAL DECORATION: On open or edit .component.html
+    function updateSignalDecorations(templateDoc) {
+        const editor = vscode.window.activeTextEditor;
+        const tsPath = templateDoc.fileName.replace(/\.html$/, ".ts");
+        if (!fs.existsSync(tsPath))
+            return;
+        try {
+            const tsText = fs.readFileSync(tsPath, "utf-8");
+            const signals = extractSignalsFromTs(tsText);
+            signalCache.set(templateDoc.uri.toString(), signals);
+            decorateSignalsInTemplate(templateDoc, signals);
+        }
+        catch { }
+    }
+    // Update on open
+    context.subscriptions.push(vscode.window.onDidChangeActiveTextEditor((editor) => {
+        if (editor &&
+            editor.document &&
+            editor.document.fileName.endsWith(".html")) {
+            updateSignalDecorations(editor.document);
+        }
+    }));
+    // Update on change
+    context.subscriptions.push(vscode.workspace.onDidChangeTextDocument((event) => {
+        const doc = event.document;
+        if (!doc.fileName.endsWith(".html"))
+            return;
+        updateSignalDecorations(doc);
+    }));
+    // Angular navigation and css
     context.subscriptions.push(vscode.languages.registerDefinitionProvider([
         { scheme: "file", language: "html" },
         { scheme: "file", language: "angular" },
-    ], new AngularDefinitionProvider(angularIndex)), vscode.languages.registerDefinitionProvider([
+    ], new AngularDefinitionProvider(angularIndex)), vscode.languages.registerHoverProvider([
         { scheme: "file", language: "html" },
         { scheme: "file", language: "angular" },
-    ], new CssClassDefinitionProvider()), vscode.languages.registerHoverProvider([
+    ], new CssClassHoverProvider()), vscode.languages.registerHoverProvider([
         { scheme: "file", language: "html" },
         { scheme: "file", language: "angular" },
-    ], new CssClassHoverProvider()));
+    ], new SignalHoverProvider((doc) => signalCache.get(doc.uri.toString()) ?? {})));
     context.subscriptions.push(vscode.commands.registerCommand("angularTemplateNavigator.refreshIndex", async () => {
         if (angularIndex.isIndexing)
             return;
         isManualRefresh = true;
-        await indexWithProgress("Angular Template Navigator: Rebuilding index...", () => angularIndex.rebuild(), "Angular Template Navigator: Indexing complete.");
+        await indexWithProgress("Angular Template Navigator: Rebuilding index.", (progress) => angularIndex.rebuild(progress), "Angular Template Navigator: Indexing complete.");
     }));
 }
-function deactivate() {
-    // Cleanup if necessary
-}
+function deactivate() { }
 //# sourceMappingURL=extension.js.map
